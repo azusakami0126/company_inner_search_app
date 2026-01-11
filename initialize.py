@@ -15,9 +15,15 @@ from dotenv import load_dotenv
 import streamlit as st
 from docx import Document
 from langchain_community.document_loaders import WebBaseLoader
-from langchain.text_splitter import CharacterTextSplitter
+from langchain.text_splitter import CharacterTextSplitter, RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
+import pandas
+from langchain.storage  import InMemoryStore
+from langchain.retrievers import ParentDocumentRetriever, MergerRetriever, ContextualCompressionRetriever
+from langchain_core.documents import Document as LCDocument
+from flashrank import Ranker
+from langchain_community.document_compressors.flashrank_rerank import FlashrankRerank
 import constants as ct
 
 
@@ -109,6 +115,29 @@ def initialize_retriever():
     if "retriever" in st.session_state:
         return
     
+    # 一般的な検索用と社員データ検索用のRetrieverを作成
+    general_retriever = create_general_retriever()
+    employee_retriever = create_employee_retriever()
+
+    # 2つのRetrieverを単純結合
+    retrievers = MergerRetriever(
+        retrievers=[general_retriever, employee_retriever]
+    )
+
+    # 検索結果の並べ替えをするRetrieverを作成
+    # （表示側で関連度順であることを期待する動作になっているため）
+    FlashrankRerank.model_rebuild()
+    compressor = FlashrankRerank(model="ms-marco-MultiBERT-L-12", top_n=ct.TOP_N)
+    st.session_state.retriever = ContextualCompressionRetriever(
+        base_compressor=compressor,
+        base_retriever=retrievers
+    )
+
+
+def create_general_retriever():
+    """
+    一般的な検索用のRetrieverを作成
+    """
     # RAGの参照先となるデータソースの読み込み
     docs_all = load_data_sources()
 
@@ -123,8 +152,8 @@ def initialize_retriever():
     
     # チャンク分割用のオブジェクトを作成
     text_splitter = CharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=50,
+        chunk_size=ct.CHUNK_SIZE,
+        chunk_overlap=ct.CHUNK_OVERLAP,
         separator="\n"
     )
 
@@ -135,7 +164,58 @@ def initialize_retriever():
     db = Chroma.from_documents(splitted_docs, embedding=embeddings)
 
     # ベクターストアを検索するRetrieverの作成
-    st.session_state.retriever = db.as_retriever(search_kwargs={"k": 3})
+    retriever = db.as_retriever(search_kwargs={"k": ct.SEARCH_K})
+    return retriever
+
+
+def create_employee_retriever():
+    """
+    社員データ検索用のRetrieverを作成
+    """
+    # ファイル読み込み
+    date_frame = pandas.read_csv(ct.EMPLOYEE_DATA_PATH)
+
+	# 部署ごとに全従業員情報をまとめた「親ドキュメント」を作成
+    parent_documents = []
+    for dept_name, group in date_frame.groupby('部署'):
+        # CSVの行番号を取り除き、部署内の全員の情報をテキスト化
+        content = f"【部署名: {dept_name}】\n" + group.to_string(index=False)
+
+        doc = LCDocument(
+            page_content = content, 
+            metadata={"source": ct.EMPLOYEE_DATA_PATH, "department": dept_name})
+
+        parent_documents.append(doc)
+
+    # 子スプリッター作成（検索用）
+    child_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=ct.CHUNK_SIZE,
+        chunk_overlap=0,
+        separators=["\n"]
+    )
+
+    # 保存先の定義
+    embeddings = OpenAIEmbeddings()
+    vectorstore = Chroma(
+        collection_name="employee_parents", 
+        embedding_function=embeddings
+    )
+
+    # 親ドキュメントの保存先をメモリ上に定義
+    store = InMemoryStore()
+
+    # Retriever生成
+    retriever = ParentDocumentRetriever(
+        vectorstore=vectorstore,
+        docstore=store,
+        child_splitter=child_splitter,
+        # Noneにすることで、add_documentsで追加する「部署ごとの塊」がそのまま親として扱われる
+        parent_splitter=None 
+    )
+
+    # ドキュメントの登録
+    retriever.add_documents(parent_documents)
+    return retriever
 
 
 def initialize_session_state():
@@ -212,8 +292,8 @@ def file_load(path, docs_all):
     # ファイル名（拡張子を含む）を取得
     file_name = os.path.basename(path)
 
-    # 想定していたファイル形式の場合のみ読み込む
-    if file_extension in ct.SUPPORTED_EXTENSIONS:
+    # 想定していたファイル形式の場合のみ読み込む。また、社員情報の場合は読み込まない。
+    if file_extension in ct.SUPPORTED_EXTENSIONS and path not in ct.EMPLOYEE_DATA_PATH:
         # ファイルの拡張子に合ったdata loaderを使ってデータ読み込み
         loader = ct.SUPPORTED_EXTENSIONS[file_extension](path)
         docs = loader.load()
