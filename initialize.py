@@ -24,6 +24,7 @@ from langchain.retrievers import ParentDocumentRetriever, MergerRetriever, Conte
 from langchain_core.documents import Document as LCDocument
 from flashrank import Ranker
 from langchain_community.document_compressors.flashrank_rerank import FlashrankRerank
+from pathlib import Path
 import constants as ct
 
 
@@ -172,20 +173,32 @@ def create_employee_retriever():
     """
     社員データ検索用のRetrieverを作成
     """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+
     # ファイル読み込み
     date_frame = pandas.read_csv(ct.EMPLOYEE_DATA_PATH)
+    logger.info(f"社員データ読み込み完了: 総従業員数={len(date_frame)}")
 
 	# 部署ごとに全従業員情報をまとめた「親ドキュメント」を作成
     parent_documents = []
     for dept_name, group in date_frame.groupby('部署'):
-        # CSVの行番号を取り除き、部署内の全員の情報をテキスト化
-        content = f"【部署名: {dept_name}】\n" + group.to_string(index=False)
+        # 部署内の全員の情報をテキスト化
+        employee_records = []
+        for idx, row in group.iterrows():
+            record = row.to_string()
+            employee_records.append(record)
+
+        # 区切り線で結合
+        content = f"【部署名: {dept_name}】\n\n" + "\n\n=================================\n\n".join(employee_records)
 
         doc = LCDocument(
             page_content = content, 
             metadata={"source": ct.EMPLOYEE_DATA_PATH, "department": dept_name})
 
         parent_documents.append(doc)
+        logger.info(f"部署ドキュメント作成: {dept_name}, 従業員数={len(group)}")
+
+    logger.info(f"親ドキュメント作成完了: 総部署数={len(parent_documents)}")
 
     # 子スプリッター作成（検索用）
     child_splitter = RecursiveCharacterTextSplitter(
@@ -293,7 +306,7 @@ def file_load(path, docs_all):
     file_name = os.path.basename(path)
 
     # 想定していたファイル形式の場合のみ読み込む。また、社員情報の場合は読み込まない。
-    if file_extension in ct.SUPPORTED_EXTENSIONS and path not in ct.EMPLOYEE_DATA_PATH:
+    if file_extension in ct.SUPPORTED_EXTENSIONS and Path(path).resolve() != Path(ct.EMPLOYEE_DATA_PATH).resolve():
         # ファイルの拡張子に合ったdata loaderを使ってデータ読み込み
         loader = ct.SUPPORTED_EXTENSIONS[file_extension](path)
         docs = loader.load()

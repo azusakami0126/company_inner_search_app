@@ -13,6 +13,7 @@ from langchain.schema import HumanMessage
 from langchain_openai import ChatOpenAI
 from langchain.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.prompts import PromptTemplate
 import constants as ct
 
 
@@ -104,7 +105,13 @@ def get_llm_response(chat_message):
     )
 
     # LLMから回答を取得する用のChainを作成
-    question_answer_chain = create_stuff_documents_chain(llm, question_answer_prompt)
+    # ドキュメントの区切りを明示＆必要な内容だけを埋め込むために、contextの埋込フォーマットを指定
+    document_prompt = PromptTemplate.from_template("---\n[Source: {source}]\n{page_content}\n---")
+    question_answer_chain = create_stuff_documents_chain(
+        llm,
+        question_answer_prompt,
+        document_prompt=document_prompt)
+
     # 「RAG x 会話履歴の記憶機能」を実現するためのChainを作成
     chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
 
